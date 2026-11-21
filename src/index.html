@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mark Desk</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar">
+      <div class="side-head">
+        <div class="brand"><span class="brand-mark"></span>Mark Desk</div>
+        <button id="newChat" class="btn primary block" type="button">＋ Новый чат</button>
+        <input id="sessionFilter" type="search" placeholder="Поиск по чатам" spellcheck="false">
+      </div>
+      <div id="sessionList" class="session-list"></div>
+      <div class="side-foot">
+        <button id="openSettings" class="btn ghost block" type="button">⚙ Настройки</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="toggleSide" class="icon-btn" type="button" title="Боковая панель" aria-label="Боковая панель">☰</button>
+        <button id="folderBtn" class="chip" type="button" title="Рабочая папка — нажмите, чтобы сменить">
+          <span class="chip-ico">▸</span><span id="folderLabel"></span>
+        </button>
+        <div class="spacer"></div>
+        <label class="select-wrap"><span>Модель</span>
+          <select id="modelSel"></select>
+        </label>
+        <label class="select-wrap"><span>Режим</span>
+          <select id="modeSel"></select>
+        </label>
+        <span id="authPill" class="pill"></span>
+      </header>
+
+      <div id="banner" class="banner hidden">
+        <div class="banner-text" id="bannerText"></div>
+        <pre class="banner-log hidden" id="bannerLog"></pre>
+        <div class="banner-actions" id="bannerActions"></div>
+      </div>
+
+      <section id="chat" class="chat">
+        <div id="chatInner" class="chat-inner"></div>
+      </section>
+
+      <footer class="composer-wrap">
+        <div class="composer">
+          <textarea id="input" rows="1" placeholder="Напишите сообщение…" spellcheck="false"></textarea>
+          <button id="sendBtn" class="send" type="button" title="Отправить">↑</button>
+        </div>
+        <div class="hint" id="hint">Enter — отправить · Shift+Enter — новая строка · Esc — остановить</div>
+      </footer>
+    </main>
+  </div>
+
+  <dialog id="settingsDlg">
+    <div class="dlg">
+      <h2>Настройки</h2>
+      <label class="field">
+        <span>Путь к Claude CLI</span>
+        <div class="row">
+          <input id="cliPath" type="text" spellcheck="false" placeholder="Определяется автоматически">
+          <button id="cliBrowse" class="btn" type="button">Обзор…</button>
+        </div>
+        <small id="cliDetected"></small>
+      </label>
+      <div class="field">
+        <label class="check">
+          <input id="isolateCfg" type="checkbox">
+          <span>Отдельная конфигурация CLI</span>
+        </label>
+        <small>Свой вход, свои настройки и свои файлы сессий: папка ~/.claude не используется. После включения нужно войти заново.</small>
+      </div>
+      <div class="field">
+        <span>История чатов и настройки приложения хранятся здесь</span>
+        <small id="dataDir"></small>
+      </div>
+      <div class="row end">
+        <button id="settingsCancel" class="btn ghost" type="button">Закрыть</button>
+        <button id="settingsSave" class="btn primary" type="button">Сохранить</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="markdown.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

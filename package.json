@@ -1,0 +1,15 @@
+{
+  "name": "mark-desk",
+  "productName": "Mark Desk",
+  "version": "0.1.0",
+  "description": "Свой десктопный интерфейс для Claude Code CLI",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^45.4.1"
+  }
+}
