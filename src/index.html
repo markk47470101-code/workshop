@@ -17,6 +17,7 @@
       </div>
       <div id="sessionList" class="session-list"></div>
       <div class="side-foot">
+        <button id="openMcp" class="btn ghost block" type="button">⌬ MCP-серверы <span id="mcpBadge" class="badge hidden"></span></button>
         <button id="openSettings" class="btn ghost block" type="button">⚙ Настройки</button>
       </div>
     </aside>
@@ -86,6 +87,136 @@
       <div class="row end">
         <button id="settingsCancel" class="btn ghost" type="button">Закрыть</button>
         <button id="settingsSave" class="btn primary" type="button">Сохранить</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="mcpDlg">
+    <div class="dlg">
+      <div class="dlg-head">
+        <h2>MCP-серверы</h2>
+        <button id="mcpClose" class="icon-btn" type="button" title="Закрыть" aria-label="Закрыть">✕</button>
+      </div>
+
+      <!-- список -->
+      <div id="mcpListView" class="dlg-body">
+        <p class="dlg-note">Серверы хранятся в Mark Desk и подключаются к каждому запуску CLI. Через них Claude получает дополнительные инструменты: файлы, браузер, базы данных, сервисы.</p>
+        <div id="mcpList" class="mcp-list"></div>
+        <div class="row">
+          <button id="mcpAdd" class="btn primary" type="button">＋ Добавить сервер</button>
+          <button id="mcpImport" class="btn" type="button">Вставить JSON</button>
+          <button id="mcpPreset" class="btn" type="button" title="Добавить сервер Higgsfield (вход через OAuth)">＋ Higgsfield</button>
+          <button id="mcpPresetCifer" class="btn" type="button" title="Добавить сервер 1Cifer (вход через OAuth; вызовы инструментов — после вашего разрешения)">＋ 1Cifer</button>
+        </div>
+        <label class="check">
+          <input id="mcpStrict" type="checkbox">
+          <span>Только серверы Mark Desk</span>
+        </label>
+        <small class="dlg-note">Если включить, CLI не будет подключать MCP-серверы из своей конфигурации.</small>
+
+        <div class="mcp-section">
+          <div class="dlg-head">
+            <h3>Коннекторы аккаунта Claude</h3>
+            <button id="connReload" class="btn sm" type="button">Обновить</button>
+          </div>
+          <p class="dlg-note">Серверы, подключённые в вашем аккаунте на claude.ai (например, Higgsfield): CLI подхватывает их сам. Чтобы Claude мог вызывать их инструменты без подтверждения, включите «Разрешить».</p>
+          <div id="connList" class="mcp-list"></div>
+        </div>
+      </div>
+
+      <!-- форма сервера -->
+      <div id="mcpFormView" class="dlg-body hidden">
+        <label class="field"><span>Имя</span>
+          <input id="mcpName" type="text" placeholder="например, github" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field"><span>Тип</span>
+          <select id="mcpType">
+            <option value="stdio">Локальная команда (stdio)</option>
+            <option value="http">Удалённый сервер (HTTP)</option>
+            <option value="sse">Удалённый сервер (SSE, устаревший)</option>
+          </select>
+        </label>
+
+        <div id="mcpStdioFields" class="dlg-body">
+          <label class="field"><span>Команда</span>
+            <input id="mcpCommand" type="text" placeholder="npx" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field"><span>Аргументы — по одному в строке</span>
+            <textarea id="mcpArgs" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;C:\Users\me\Documents" spellcheck="false"></textarea>
+          </label>
+          <label class="field"><span>Переменные окружения — KEY=значение, по одной в строке</span>
+            <textarea id="mcpEnv" rows="2" placeholder="API_TOKEN=..." spellcheck="false"></textarea>
+          </label>
+        </div>
+
+        <div id="mcpRemoteFields" class="dlg-body hidden">
+          <label class="field"><span>URL</span>
+            <input id="mcpUrl" type="text" placeholder="https://example.com/mcp" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field"><span>Авторизация</span>
+            <select id="mcpAuth">
+              <option value="none">Без OAuth (при необходимости — заголовки ниже)</option>
+              <option value="oauth">OAuth — вход через браузер</option>
+            </select>
+          </label>
+          <label id="mcpClientIdField" class="field hidden"><span>OAuth Client ID — необязательно, если сервер сам регистрирует приложения</span>
+            <input id="mcpClientId" type="text" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field"><span>Заголовки — Имя: значение, по одному в строке</span>
+            <textarea id="mcpHeaders" rows="2" placeholder="Authorization: Bearer ..." spellcheck="false"></textarea>
+          </label>
+        </div>
+
+        <div id="mcpPermSimple" class="dlg-body">
+          <label class="check">
+            <input id="mcpAuto" type="checkbox" checked>
+            <span>Разрешать Claude вызывать инструменты этого сервера без подтверждения</span>
+          </label>
+          <label class="field"><span>Всегда запрещать эти инструменты — по одному в строке (имена из списка «Проверить»)</span>
+            <textarea id="mcpDeny" rows="2" placeholder="delete_tasks" spellcheck="false"></textarea>
+          </label>
+        </div>
+        <div id="mcpPermManaged" class="dlg-note hidden">Разрешения этого сервера настроены по отдельным инструментам. Изменить их можно кнопкой «Разрешения» в списке серверов.</div>
+        <small class="dlg-note">Подтверждений в приложении пока нет: если не разрешить, вызовы будут отклонены. Токены сохраняются в файле mcp.json в папке данных приложения.</small>
+
+        <div id="mcpTestResult" class="mcp-result hidden"></div>
+        <div class="row end">
+          <button id="mcpFormCancel" class="btn ghost" type="button">Назад</button>
+          <button id="mcpFormTest" class="btn" type="button">Проверить</button>
+          <button id="mcpFormSave" class="btn primary" type="button">Сохранить</button>
+        </div>
+      </div>
+
+      <!-- импорт JSON -->
+      <div id="mcpJsonView" class="dlg-body hidden">
+        <p class="dlg-note">Вставьте конфигурацию из документации сервера, например <code>{ "mcpServers": { "name": { "command": "npx", "args": ["-y", "..."] } } }</code>. Серверы с уже существующими именами пропускаются.</p>
+        <textarea id="mcpJson" rows="10" spellcheck="false" placeholder='{ "mcpServers": { ... } }'></textarea>
+        <div id="mcpJsonResult" class="mcp-result hidden"></div>
+        <div class="row end">
+          <button id="mcpJsonCancel" class="btn ghost" type="button">Назад</button>
+          <button id="mcpJsonDo" class="btn primary" type="button">Импортировать</button>
+        </div>
+      </div>
+
+      <!-- разрешения по инструментам -->
+      <div id="mcpPermView" class="dlg-body hidden">
+        <h3 id="mcpPermTitle" class="perm-title"></h3>
+        <p class="dlg-note">Отмеченные инструменты Claude вызывает без подтверждения. Остальные ему недоступны. Новые инструменты сервера по умолчанию не отмечены.</p>
+        <div class="row wrap">
+          <button class="btn sm" type="button" data-preset="read">Только чтение</button>
+          <button class="btn sm" type="button" data-preset="safe">Без опасных</button>
+          <button class="btn sm" type="button" data-preset="all">Все</button>
+          <button class="btn sm" type="button" data-preset="none">Ни одного</button>
+          <span class="spacer"></span>
+          <button id="mcpPermRefresh" class="btn sm" type="button">Обновить список</button>
+        </div>
+        <div id="mcpPermSummary" class="mcp-status"></div>
+        <div id="mcpPermResult" class="mcp-result hidden"></div>
+        <div id="mcpPermList" class="mcp-list"></div>
+        <div class="row end">
+          <button id="mcpPermCancel" class="btn ghost" type="button">Назад</button>
+          <button id="mcpPermSave" class="btn primary" type="button">Сохранить</button>
+        </div>
       </div>
     </div>
   </dialog>

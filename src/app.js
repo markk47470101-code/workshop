@@ -45,6 +45,8 @@
     lastNotice: '',
     hadResult: false,
     stick: true,
+    mcpRun: {},
+    mcpSummary: '',
   };
 
   // ───────────── утилиты ─────────────
@@ -195,11 +197,14 @@
   function paintText(b) {
     if (b.queued) return;
     b.queued = true;
-    requestAnimationFrame(() => {
+    const flush = () => {
       b.queued = false;
       b.el.innerHTML = window.renderMarkdown(b.text);
       scroll();
-    });
+    };
+    // В свёрнутом или полностью перекрытом окне requestAnimationFrame не вызывается — красим по таймеру.
+    if (document.hidden) setTimeout(flush, 50);
+    else requestAnimationFrame(flush);
   }
 
   function newThinkingBlock() {
@@ -211,6 +216,13 @@
   }
 
   // ───────────── карточки инструментов ─────────────
+
+  // mcp__сервер__инструмент → «сервер · инструмент»
+  function toolLabel(name) {
+    return typeof name === 'string' && name.startsWith('mcp__')
+      ? name.slice(5).replace(/^claude_ai_/, '').replace('__', ' · ')
+      : name;
+  }
 
   function toolSummary(name, input) {
     if (!input || typeof input !== 'object') return '';
@@ -253,7 +265,8 @@
     const desc = el('span', 'tool-desc');
     const st = el('span', 'tool-state running');
     const sum = el('summary');
-    sum.append(el('span', 'tool-name', name), desc, st);
+    // mcp__сервер__инструмент → «сервер · инструмент»
+    sum.append(el('span', 'tool-name', toolLabel(name)), desc, st);
     const inPre = el('pre', 'tool-in');
     const outLabel = el('div', 'tool-label hidden', 'Результат');
     const outPre = el('pre', 'tool-out hidden');
@@ -297,9 +310,52 @@
     }
   }
 
+  const MCP_RUN_LABEL = {
+    connected: 'подключён',
+    failed: 'не удалось подключиться',
+    'needs-auth': 'нужна авторизация',
+    pending: 'подключается…',
+    disabled: 'отключён',
+  };
+
+  // Статус MCP-серверов из события init: проблемные показываем сразу, остальное — в строке под полем ввода.
+  // Касается ли сервер пользователя: свои серверы приложения и разрешённые коннекторы аккаунта.
+  // Остальные коннекторы аккаунта (например, ещё не авторизованные) чат предупреждениями не засоряют.
+  const isRelevantMcp = (name) =>
+    mcpState.servers.some((s) => s.name === name) ||
+    (state.settings.allowedConnectors || []).includes(name);
+
+  function onMcpStatus(list) {
+    state.mcpRun = {};
+    state.mcpSummary = '';
+    let connected = 0;
+    let pending = 0;
+    let total = 0;
+    for (const s of list) {
+      if (!s || !s.name) continue;
+      state.mcpRun[s.name] = s.status;
+      if (!isRelevantMcp(s.name)) continue;
+      total++;
+      if (s.status === 'connected') connected++;
+      else if (s.status === 'pending') pending++;
+      else if (s.status === 'failed' || s.status === 'needs-auth') {
+        const own = mcpState.servers.find((x) => x.name === s.name);
+        const hint = own && own.auth === 'oauth' ? ' — войдите: «MCP-серверы» → «Войти»' : '';
+        notice('MCP-сервер «' + s.name + '»: ' + (MCP_RUN_LABEL[s.status] || s.status) + hint, 'warn');
+      }
+    }
+    if (total) state.mcpSummary = ' · MCP: ' + connected + '/' + total + (pending ? '…' : '');
+    if (state.running) showTyping();
+    if ($('mcpDlg').open) renderMcpList();
+  }
+
   function onSystem(ev) {
     if (ev.subtype !== 'init') return;
-    if (ev.model) $('hint').textContent = 'Модель: ' + ev.model + ' · Enter — отправить · Esc — остановить';
+    onMcpStatus(Array.isArray(ev.mcp_servers) ? ev.mcp_servers : []);
+    if (ev.model) {
+      $('hint').textContent =
+        'Модель: ' + ev.model + state.mcpSummary + ' · Enter — отправить · Esc — остановить';
+    }
   }
 
   function onStream(e) {
@@ -408,12 +464,24 @@
 
     const denials = Array.isArray(ev.permission_denials) ? ev.permission_denials : [];
     if (denials.length) {
-      const names = [...new Set(denials.map((d) => d.tool_name || d.toolName || '?'))].join(', ');
-      notice(
-        'Claude хотел использовать: ' + names +
-          '. Текущий режим этого не разрешает — при необходимости переключите режим сверху.',
-        'warn'
-      );
+      const all = [...new Set(denials.map((d) => d.tool_name || d.toolName || '?'))];
+      const mcpNames = all.filter((n) => String(n).startsWith('mcp__'));
+      const other = all.filter((n) => !String(n).startsWith('mcp__'));
+      if (mcpNames.length) {
+        notice(
+          'Claude хотел вызвать MCP-инструменты: ' + mcpNames.map(toolLabel).join(', ') +
+            '. Они не разрешены заранее — включите «Разрешать Claude вызывать инструменты без подтверждения» ' +
+            'у сервера: «MCP-серверы» → «Изменить».',
+          'warn'
+        );
+      }
+      if (other.length) {
+        notice(
+          'Claude хотел использовать: ' + other.join(', ') +
+            '. Текущий режим этого не разрешает — при необходимости переключите режим сверху.',
+          'warn'
+        );
+      }
     }
 
     const parts = [];
@@ -759,6 +827,574 @@
     refreshAuth();
   });
 
+  // ───────────── MCP-серверы ─────────────
+
+  const mcpState = { servers: [], strict: false, tests: {}, editingId: null, oauthBusy: null };
+
+  // Готовые серверы одной кнопкой. Вход (OAuth) пользователь запускает отдельно.
+  const MCP_PRESETS = {
+    higgsfield: {
+      name: 'higgsfield',
+      type: 'http',
+      url: 'https://mcp.higgsfield.ai/mcp',
+      auth: 'oauth',
+      autoApprove: true,
+    },
+    // Рабочая система компании (задачи агентам, согласования, юридические справки).
+    cifer: {
+      name: '1cifer',
+      type: 'http',
+      url: 'https://mcp.1cifer.kz/mcp',
+      auth: 'oauth',
+      // Сервер разрешён целиком, но решения по карточкам согласования и удаление задач остаются за человеком.
+      autoApprove: true,
+      denyTools: ['decide', 'delete_tasks'],
+    },
+  };
+
+  const mcpSummary = (s) => (s.type === 'stdio' ? [s.command, ...s.args].join(' ') : s.url);
+
+  function updateMcpBadge() {
+    const n = mcpState.servers.filter((s) => s.enabled).length;
+    const badge = $('mcpBadge');
+    badge.textContent = String(n);
+    badge.classList.toggle('hidden', n === 0);
+  }
+
+  function describeTest(r) {
+    if (r.ok) {
+      const info = r.serverInfo ? [r.serverInfo.name, r.serverInfo.version].filter(Boolean).join(' ') : '';
+      const shown = r.tools.slice(0, 10).map((t) => t.name).join(', ') + (r.tools.length > 10 ? '…' : '');
+      return {
+        cls: 'ok',
+        text:
+          '✓ Подключено' + (info ? ' · ' + info : '') +
+          '\nИнструментов: ' + r.tools.length + (shown ? ' — ' + shown : '') +
+          (r.note ? '\n' + r.note : ''),
+      };
+    }
+    return { cls: r.unsupported ? '' : 'bad', text: (r.unsupported ? '' : '✕ ') + r.error };
+  }
+
+  function mcpStatusFor(s) {
+    if (mcpState.tests[s.id]) return mcpState.tests[s.id];
+    const run = state.mcpRun[s.name];
+    if (run) {
+      return { cls: run === 'connected' ? 'ok' : 'bad', text: 'В последнем запуске: ' + (MCP_RUN_LABEL[run] || run) };
+    }
+    return null;
+  }
+
+  function renderMcpList() {
+    const box = $('mcpList');
+    box.textContent = '';
+    $('mcpStrict').checked = mcpState.strict;
+    if (!mcpState.servers.length) {
+      box.append(el('div', 'mcp-empty', 'Серверов пока нет. Добавьте сервер или вставьте JSON из его документации.'));
+      return;
+    }
+    for (const s of mcpState.servers) {
+      const item = el('div', 'mcp-item' + (s.enabled ? '' : ' off'));
+
+      const sw = document.createElement('input');
+      sw.type = 'checkbox';
+      sw.checked = s.enabled;
+      sw.title = s.enabled ? 'Включён — нажмите, чтобы отключить' : 'Отключён — нажмите, чтобы включить';
+      sw.setAttribute('aria-label', 'Сервер включён');
+      sw.addEventListener('change', () => toggleMcp(s, sw.checked));
+      const top = el('div', 'mcp-top');
+      top.append(sw, el('span', 'mcp-name', s.name), el('span', 'mcp-type', s.type));
+
+      const sum = el('div', 'mcp-sum', mcpSummary(s));
+      sum.title = mcpSummary(s);
+      item.append(top, sum);
+      if (s.auth === 'oauth') item.append(oauthLine(s));
+      if (!s.autoApprove) {
+        item.append(el(
+          'div',
+          'mcp-status warn',
+          'Вызовы инструментов отклоняются. Выберите, что можно разрешить, в «Разрешения».'
+        ));
+      } else if (Array.isArray(s.allowTools)) {
+        const denied = s.denyTools || [];
+        const total = (s.knownTools || []).length || s.allowTools.length + denied.length;
+        item.append(el(
+          'div',
+          'mcp-status',
+          'Разрешено инструментов: ' + s.allowTools.length + ' из ' + total +
+            (denied.length ? ' · запрещены: ' + denied.join(', ') : '')
+        ));
+      } else if (s.denyTools && s.denyTools.length) {
+        item.append(el('div', 'mcp-status', 'Всегда запрещены: ' + s.denyTools.join(', ')));
+      }
+
+      const st = mcpStatusFor(s);
+      if (st) item.append(el('div', 'mcp-status ' + st.cls, st.text));
+
+      const actions = el('div', 'mcp-actions');
+      if (s.auth === 'oauth') {
+        if (mcpState.oauthBusy === s.id) {
+          actions.append(button('Отмена входа', () => api.mcpOAuthCancel(), 'sm'));
+        } else {
+          const signedIn = s.oauth && s.oauth.state === 'ok';
+          actions.append(button(signedIn ? 'Войти заново' : 'Войти', () => oauthLogin(s), 'sm primary'));
+          if (signedIn) actions.append(button('Выйти', () => oauthLogout(s), 'sm'));
+        }
+      }
+      actions.append(
+        button('Разрешения', () => openPermissions(s), 'sm'),
+        button('Проверить', () => testMcp(s), 'sm'),
+        button('Изменить', () => editMcp(s), 'sm'),
+        button('Удалить', () => deleteMcp(s), 'sm')
+      );
+      item.append(actions);
+      box.append(item);
+    }
+  }
+
+  function oauthLine(s) {
+    const o = s.oauth || { state: 'none' };
+    let cls = 'warn';
+    let text = 'OAuth: нужен вход';
+    if (mcpState.oauthBusy === s.id) {
+      text = 'OAuth: жду подтверждения входа в браузере…';
+    } else if (o.state === 'ok') {
+      cls = 'ok';
+      text = '✓ OAuth: вход выполнен';
+      if (o.expiresAt && o.canRefresh) text += ' · токен обновляется сам';
+      else if (o.expiresAt) {
+        text += ' · токен до ' + new Date(o.expiresAt).toLocaleString('ru-RU', {
+          day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+      }
+    } else if (o.state === 'expired') {
+      text = 'OAuth: сессия истекла — войдите снова';
+    }
+    return el('div', 'mcp-status ' + cls, text);
+  }
+
+  async function oauthLogin(s) {
+    mcpState.oauthBusy = s.id;
+    mcpState.tests[s.id] = { cls: '', text: 'Открываю браузер… Подтвердите вход там и вернитесь сюда.' };
+    renderMcpList();
+    const r = await api.mcpOAuthLogin(s.id);
+    mcpState.oauthBusy = null;
+    await refreshMcp();
+    if (!r.ok) {
+      mcpState.tests[s.id] = { cls: 'bad', text: '✕ ' + r.error };
+      renderMcpList();
+      return;
+    }
+    mcpState.tests[s.id] = { cls: '', text: 'Вход выполнен. Проверяю соединение…' };
+    renderMcpList();
+    mcpState.tests[s.id] = describeTest(await api.mcpTest(s.id));
+    await refreshMcp(); // список инструментов сохранён — обновим данные серверов
+    renderMcpList();
+  }
+
+  async function oauthLogout(s) {
+    await api.mcpOAuthLogout(s.id);
+    delete mcpState.tests[s.id];
+    delete state.mcpRun[s.name]; // статус прошлого запуска после выхода уже недостоверен
+    await refreshMcp();
+  }
+
+  // ───── разрешения по инструментам ─────
+
+  const permState = { id: null, tools: [], allowed: new Set(), fresh: new Set() };
+  const PERM_BADGE = { read: 'чтение', write: 'изменяет', danger: 'опасно' };
+  const PERM_ORDER = { read: 0, write: 1, danger: 2 };
+
+  // Подсказки сервера (annotations) важнее догадок по названию.
+  function classifyTool(t) {
+    if (t.destructive === true) return 'danger';
+    if (t.readOnly === true) return 'read';
+    const n = String(t.name).toLowerCase();
+    if (/(^|_)(delete|remove|drop|destroy|purge|wipe|decide|approve|reject|pay|transfer|send)(_|$)/.test(n)) return 'danger';
+    if (/^(list|get|ask|search|find|read|show|fetch|query|describe|check|view|lookup)(_|$)/.test(n)) return 'read';
+    return 'write';
+  }
+
+  const permServer = () => mcpState.servers.find((s) => s.id === permState.id);
+
+  // Какие инструменты отмечены по сохранённым настройкам сервера.
+  function allowedBySettings(s, tools) {
+    if (!s.autoApprove) return new Set();
+    const deny = new Set(s.denyTools || []);
+    const base = Array.isArray(s.allowTools) ? s.allowTools : tools.map((t) => t.name);
+    return new Set(base.filter((n) => !deny.has(n)));
+  }
+
+  function updatePermSummary() {
+    const total = permState.tools.length;
+    const allowed = permState.tools.filter((t) => permState.allowed.has(t.name)).length;
+    $('mcpPermSummary').textContent = total
+      ? 'Разрешено ' + allowed + ' из ' + total
+      : 'Список инструментов пуст — нажмите «Обновить список».';
+  }
+
+  function renderPerms() {
+    const s = permServer();
+    $('mcpPermTitle').textContent = 'Разрешения: ' + (s ? s.name : '');
+    const box = $('mcpPermList');
+    box.textContent = '';
+    const sorted = [...permState.tools].sort(
+      (a, b) =>
+        PERM_ORDER[classifyTool(a)] - PERM_ORDER[classifyTool(b)] || a.name.localeCompare(b.name)
+    );
+    for (const t of sorted) {
+      const kind = classifyTool(t);
+      const row = el('label', 'perm-row');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = permState.allowed.has(t.name);
+      cb.dataset.tool = t.name;
+      cb.addEventListener('change', () => {
+        if (cb.checked) permState.allowed.add(t.name);
+        else permState.allowed.delete(t.name);
+        updatePermSummary();
+      });
+      const head = el('div');
+      head.append(el('span', 'perm-name', t.name), el('span', 'perm-badge ' + kind, PERM_BADGE[kind]));
+      if (permState.fresh.has(t.name)) head.append(el('span', 'perm-badge fresh', 'новый'));
+      row.append(cb, head, el('div', 'perm-desc', t.description || 'Без описания'));
+      box.append(row);
+    }
+    updatePermSummary();
+  }
+
+  function applyPermPreset(kind) {
+    const pick = { read: (k) => k === 'read', safe: (k) => k !== 'danger', all: () => true, none: () => false }[kind];
+    if (!pick) return;
+    permState.allowed = new Set(permState.tools.filter((t) => pick(classifyTool(t))).map((t) => t.name));
+    renderPerms();
+  }
+
+  async function refreshPermTools() {
+    const s = permServer();
+    if (!s) return;
+    showResult('mcpPermResult', { cls: '', text: 'Запрашиваю список инструментов у сервера…' });
+    const r = await api.mcpTest(s.id);
+    if (!r.ok) {
+      showResult('mcpPermResult', { cls: 'bad', text: '✕ ' + r.error });
+      return;
+    }
+    const before = new Set(permState.tools.map((t) => t.name));
+    if (before.size) {
+      permState.fresh = new Set(r.tools.map((t) => t.name).filter((n) => !before.has(n)));
+      permState.allowed = new Set([...permState.allowed].filter((n) => r.tools.some((t) => t.name === n)));
+    } else {
+      permState.fresh = new Set();
+      permState.allowed = allowedBySettings(s, r.tools);
+    }
+    permState.tools = r.tools;
+    $('mcpPermResult').className = 'mcp-result hidden';
+    if (permState.fresh.size) {
+      showResult('mcpPermResult', {
+        cls: '',
+        text: 'Новые инструменты: ' + [...permState.fresh].join(', ') + '. По умолчанию они не разрешены.',
+      });
+    }
+    await refreshMcp(); // список инструментов сохранён в настройках сервера
+    renderPerms();
+  }
+
+  async function openPermissions(s) {
+    permState.id = s.id;
+    permState.tools = s.knownTools || [];
+    permState.allowed = allowedBySettings(s, permState.tools);
+    permState.fresh = new Set();
+    $('mcpPermResult').className = 'mcp-result hidden';
+    renderPerms();
+    showMcpView('perm');
+    if (!permState.tools.length) await refreshPermTools();
+  }
+
+  async function savePerms() {
+    const s = permServer();
+    if (!s) return;
+    const names = permState.tools.map((t) => t.name);
+    const allowed = names.filter((n) => permState.allowed.has(n));
+    const denied = names.filter((n) => !permState.allowed.has(n));
+    // Явный список разрешённых: новые инструменты сервера остаются недоступными, пока их не отметят.
+    const r = await api.mcpSave({
+      ...s,
+      autoApprove: allowed.length > 0,
+      allowTools: allowed,
+      denyTools: denied,
+      knownTools: permState.tools,
+    });
+    if (!r.ok) {
+      showResult('mcpPermResult', { cls: 'bad', text: '✕ ' + r.error });
+      return;
+    }
+    mcpState.servers = r.servers;
+    updateMcpBadge();
+    renderMcpList();
+    showMcpView('list');
+  }
+
+  async function addMcpPreset(key) {
+    const preset = MCP_PRESETS[key];
+    if (!mcpState.servers.some((s) => s.name === preset.name)) {
+      const r = await api.mcpSave(preset);
+      if (!r.ok) {
+        mcpState.tests.preset = { cls: 'bad', text: '✕ ' + r.error };
+        alert(r.error);
+        return;
+      }
+      mcpState.servers = r.servers;
+      updateMcpBadge();
+    }
+    renderMcpList();
+  }
+
+  async function refreshMcp() {
+    try {
+      const r = await api.mcpList();
+      mcpState.servers = r.servers;
+      mcpState.strict = r.strict;
+    } catch { /* оставляем прежний список */ }
+    updateMcpBadge();
+    if ($('mcpDlg').open) renderMcpList();
+  }
+
+  function showMcpView(name) {
+    $('mcpListView').classList.toggle('hidden', name !== 'list');
+    $('mcpFormView').classList.toggle('hidden', name !== 'form');
+    $('mcpJsonView').classList.toggle('hidden', name !== 'json');
+    $('mcpPermView').classList.toggle('hidden', name !== 'perm');
+  }
+
+  function syncMcpType() {
+    const stdio = $('mcpType').value === 'stdio';
+    $('mcpStdioFields').classList.toggle('hidden', !stdio);
+    $('mcpRemoteFields').classList.toggle('hidden', stdio);
+    $('mcpClientIdField').classList.toggle('hidden', stdio || $('mcpAuth').value !== 'oauth');
+  }
+
+  function showResult(id, r) {
+    const box = $(id);
+    box.className = 'mcp-result ' + r.cls;
+    box.textContent = r.text;
+  }
+
+  function editMcp(s) {
+    mcpState.editingId = s ? s.id : null;
+    const stdio = !s || s.type === 'stdio';
+    $('mcpName').value = s ? s.name : '';
+    $('mcpType').value = s ? s.type : 'stdio';
+    $('mcpCommand').value = s && stdio ? s.command : '';
+    $('mcpArgs').value = s && stdio ? s.args.join('\n') : '';
+    $('mcpEnv').value = s && stdio ? Object.entries(s.env).map(([k, v]) => k + '=' + v).join('\n') : '';
+    $('mcpUrl').value = s && !stdio ? s.url : '';
+    $('mcpAuth').value = s && !stdio && s.auth === 'oauth' ? 'oauth' : 'none';
+    $('mcpClientId').value = s && !stdio && s.oauthClientId ? s.oauthClientId : '';
+    $('mcpHeaders').value = s && !stdio ? Object.entries(s.headers).map(([k, v]) => k + ': ' + v).join('\n') : '';
+    $('mcpAuto').checked = s ? s.autoApprove : true;
+    $('mcpDeny').value = s && s.denyTools ? s.denyTools.join('\n') : '';
+    // Если разрешения настроены по инструментам, простые поля здесь не нужны.
+    const managed = !!(s && Array.isArray(s.allowTools));
+    $('mcpPermSimple').classList.toggle('hidden', managed);
+    $('mcpPermManaged').classList.toggle('hidden', !managed);
+    $('mcpTestResult').className = 'mcp-result hidden';
+    syncMcpType();
+    showMcpView('form');
+    $('mcpName').focus();
+  }
+
+  function readMcpForm() {
+    const lines = (text) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const existing = mcpState.servers.find((s) => s.id === mcpState.editingId);
+    const type = $('mcpType').value;
+    const draft = {
+      id: mcpState.editingId || undefined,
+      name: $('mcpName').value.trim(),
+      type,
+      enabled: existing ? existing.enabled : true,
+      autoApprove: $('mcpAuto').checked,
+      denyTools: lines($('mcpDeny').value),
+    };
+    if (existing && Array.isArray(existing.allowTools)) {
+      draft.autoApprove = existing.autoApprove;
+      draft.denyTools = existing.denyTools;
+      draft.allowTools = existing.allowTools;
+    }
+    if (type === 'stdio') {
+      draft.command = $('mcpCommand').value.trim();
+      draft.args = lines($('mcpArgs').value);
+      draft.env = {};
+      for (const l of lines($('mcpEnv').value)) {
+        const i = l.indexOf('=');
+        if (i > 0) draft.env[l.slice(0, i).trim()] = l.slice(i + 1);
+      }
+    } else {
+      draft.url = $('mcpUrl').value.trim();
+      draft.auth = $('mcpAuth').value;
+      draft.oauthClientId = $('mcpClientId').value.trim();
+      draft.headers = {};
+      for (const l of lines($('mcpHeaders').value)) {
+        const i = l.indexOf(':');
+        if (i > 0) draft.headers[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+      }
+    }
+    return draft;
+  }
+
+  async function saveMcpForm() {
+    const r = await api.mcpSave(readMcpForm());
+    if (!r.ok) { showResult('mcpTestResult', { cls: 'bad', text: '✕ ' + r.error }); return; }
+    mcpState.servers = r.servers;
+    delete mcpState.tests[r.server.id];
+    updateMcpBadge();
+    renderMcpList();
+    showMcpView('list');
+  }
+
+  async function testMcpForm() {
+    showResult('mcpTestResult', { cls: '', text: 'Проверяю… Первый запуск через npx может занять до минуты.' });
+    showResult('mcpTestResult', describeTest(await api.mcpTest(readMcpForm())));
+  }
+
+  async function testMcp(s) {
+    mcpState.tests[s.id] = { cls: '', text: 'Проверяю…' };
+    renderMcpList();
+    mcpState.tests[s.id] = describeTest(await api.mcpTest(s.id));
+    await refreshMcp(); // список инструментов сохранён — обновим данные серверов
+    renderMcpList();
+  }
+
+  async function toggleMcp(s, enabled) {
+    const r = await api.mcpSave({ ...s, enabled });
+    if (r.ok) mcpState.servers = r.servers;
+    updateMcpBadge();
+    renderMcpList();
+  }
+
+  async function deleteMcp(s) {
+    if (!window.confirm('Удалить MCP-сервер «' + s.name + '»?')) return;
+    mcpState.servers = await api.mcpDelete(s.id);
+    delete mcpState.tests[s.id];
+    updateMcpBadge();
+    renderMcpList();
+  }
+
+  async function importMcp() {
+    const r = await api.mcpImport($('mcpJson').value);
+    if (!r.ok) { showResult('mcpJsonResult', { cls: 'bad', text: '✕ ' + r.error }); return; }
+    mcpState.servers = r.servers;
+    updateMcpBadge();
+    renderMcpList();
+    const parts = [];
+    if (r.added.length) parts.push('Добавлено: ' + r.added.join(', ') + '.');
+    for (const s of r.skipped) parts.push('Пропущен «' + s.name + '»: ' + s.reason + '.');
+    showResult('mcpJsonResult', { cls: r.added.length ? 'ok' : 'bad', text: parts.join('\n') || 'Нечего добавлять.' });
+    if (r.added.length) $('mcpJson').value = '';
+  }
+
+  // Коннекторы аккаунта Claude: показываем статус и даём разрешить вызовы их инструментов.
+  const connState = { list: null, loading: false, error: null };
+
+  function connStatusText(c) {
+    if (c.status === 'connected') return '✓ Подключён';
+    if (c.status === 'needs-auth') return 'Нужна авторизация — подключите коннектор на claude.ai (Settings → Connectors)';
+    return '✕ Не удалось подключиться';
+  }
+
+  function renderConnectors() {
+    const box = $('connList');
+    box.textContent = '';
+    if (connState.loading) { box.append(el('div', 'mcp-empty', 'Загружаю список…')); return; }
+    if (connState.error) { box.append(el('div', 'mcp-empty', connState.error)); return; }
+    if (!connState.list || !connState.list.length) {
+      box.append(el('div', 'mcp-empty', 'Коннекторов не найдено. Подключите их на claude.ai — CLI подхватит их сам (нужен вход в аккаунт).'));
+      return;
+    }
+    if (mcpState.strict) {
+      box.append(el('div', 'dlg-note', 'Включён режим «Только серверы Mark Desk»: коннекторы сейчас не подключаются.'));
+    }
+    const allowed = new Set(state.settings.allowedConnectors || []);
+    for (const c of connState.list) {
+      const item = el('div', 'mcp-item');
+      const left = el('div', 'mcp-top');
+      left.append(el('span', 'mcp-name', c.name.replace(/^claude\.ai /, '')), el('span', 'mcp-type', 'claude.ai'));
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = allowed.has(c.name);
+      cb.addEventListener('change', () => toggleConnector(c.name, cb.checked));
+      const label = el('label', 'check');
+      label.title = 'Claude сможет вызывать инструменты этого коннектора без подтверждения';
+      label.append(cb, el('span', null, 'Разрешить'));
+
+      const row = el('div', 'mcp-conn-row');
+      row.append(left, label);
+      const cls = c.status === 'connected' ? 'ok' : c.status === 'needs-auth' ? '' : 'bad';
+      item.append(row, el('div', 'mcp-status ' + cls, connStatusText(c)));
+      box.append(item);
+    }
+  }
+
+  async function loadConnectors(force) {
+    if (connState.loading || (connState.list && !force)) return;
+    connState.loading = true;
+    connState.error = null;
+    renderConnectors();
+    try {
+      const r = await api.connectorsList();
+      if (r.ok) connState.list = r.connectors;
+      else connState.error = r.error;
+    } catch (err) {
+      connState.error = String(err.message || err);
+    }
+    connState.loading = false;
+    renderConnectors();
+  }
+
+  async function toggleConnector(name, on) {
+    const cur = new Set(state.settings.allowedConnectors || []);
+    if (on) cur.add(name); else cur.delete(name);
+    state.settings = (await api.setSettings({ allowedConnectors: [...cur] })).settings;
+    renderConnectors();
+  }
+
+  $('connReload').addEventListener('click', () => loadConnectors(true));
+
+  $('openMcp').addEventListener('click', async () => {
+    await refreshMcp();
+    showMcpView('list');
+    renderMcpList();
+    $('mcpDlg').showModal();
+    loadConnectors(false);
+  });
+  $('mcpClose').addEventListener('click', () => $('mcpDlg').close());
+  $('mcpAdd').addEventListener('click', () => editMcp(null));
+  $('mcpImport').addEventListener('click', () => {
+    $('mcpJson').value = '';
+    $('mcpJsonResult').className = 'mcp-result hidden';
+    showMcpView('json');
+    $('mcpJson').focus();
+  });
+  $('mcpPermCancel').addEventListener('click', () => showMcpView('list'));
+  $('mcpPermSave').addEventListener('click', savePerms);
+  $('mcpPermRefresh').addEventListener('click', refreshPermTools);
+  document.querySelectorAll('#mcpPermView [data-preset]').forEach((b) => {
+    b.addEventListener('click', () => applyPermPreset(b.dataset.preset));
+  });
+  $('mcpType').addEventListener('change', syncMcpType);
+  $('mcpAuth').addEventListener('change', syncMcpType);
+  $('mcpPreset').addEventListener('click', () => addMcpPreset('higgsfield'));
+  $('mcpPresetCifer').addEventListener('click', () => addMcpPreset('cifer'));
+  $('mcpFormCancel').addEventListener('click', () => showMcpView('list'));
+  $('mcpFormTest').addEventListener('click', testMcpForm);
+  $('mcpFormSave').addEventListener('click', saveMcpForm);
+  $('mcpJsonCancel').addEventListener('click', () => showMcpView('list'));
+  $('mcpJsonDo').addEventListener('click', importMcp);
+  $('mcpStrict').addEventListener('change', async (e) => {
+    state.settings = (await api.setSettings({ strictMcp: e.target.checked })).settings;
+    mcpState.strict = e.target.checked;
+  });
+
   // ───────────── обработчики интерфейса ─────────────
 
   sendBtn.addEventListener('click', () => (state.running ? stop() : send()));
@@ -832,6 +1468,7 @@
     setRunning(false);
     loadSessions();
     refreshAuth();
+    refreshMcp();
     input.focus();
   })();
 })();

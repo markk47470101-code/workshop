@@ -41,8 +41,39 @@ async function main() {
     return;
   }
 
+  // `claude mcp list`: коннекторы аккаунта плюс обычный сервер из конфигурации CLI (его приложение игнорирует).
+  if (args[0] === 'mcp' && args[1] === 'list') {
+    console.log('Checking MCP server health…\n');
+    console.log('claude.ai Claude Docs: https://example.com/pages/mcp - √ Connected');
+    console.log('claude.ai Higgsfield: https://mcp.higgsfield.ai/mcp - √ Connected');
+    console.log('claude.ai Google Docs: https://docs.example/mcp/v1 - ! Needs authentication');
+    console.log('local-tool: node C:\\tools\\server.js - √ Connected');
+    return;
+  }
+
+  // FAKE_ARGS_LOG=<файл>: дописывает аргументы запуска (для проверки передачи MCP-флагов).
+  if (process.env.FAKE_ARGS_LOG) {
+    require('fs').appendFileSync(process.env.FAKE_ARGS_LOG, JSON.stringify(args) + '\n');
+    // токены OAuth, которые приложение передаёт через переменные окружения
+    const tokens = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('MARK_DESK_TOKEN_')));
+    require('fs').appendFileSync(process.env.FAKE_ARGS_LOG + '.env', JSON.stringify(tokens) + '\n');
+  }
+
   let prompt = '';
   for await (const chunk of process.stdin) prompt += chunk;
+
+  // MCP: читаем файл из --mcp-config и «подключаем» серверы; имена на bad… считаются сломанными.
+  const mcpIdx = args.indexOf('--mcp-config');
+  let mcpServers = [];
+  if (mcpIdx >= 0) {
+    try {
+      const cfg = JSON.parse(require('fs').readFileSync(args[mcpIdx + 1], 'utf8'));
+      mcpServers = Object.keys(cfg.mcpServers || {}).map((name) => ({
+        name,
+        status: name.startsWith('bad') ? 'failed' : 'connected',
+      }));
+    } catch { /* файл не прочитался */ }
+  }
 
   const resumeIdx = args.indexOf('--resume');
   const resumed = resumeIdx >= 0;
@@ -57,7 +88,12 @@ async function main() {
     process.exit(1);
   }
 
-  out({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake-model-1', cwd: process.cwd(), tools: ['Bash'] });
+  out({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake-model-1', cwd: process.cwd(), tools: ['Bash'], mcp_servers: [
+    ...mcpServers,
+    // коннекторы аккаунта приходят в init всегда; один ещё подключается, другой не авторизован
+    { name: 'claude.ai Higgsfield', status: 'pending' },
+    { name: 'claude.ai Google Docs', status: 'needs-auth' },
+  ] });
 
   const streamText = async (index, text) => {
     out({ type: 'stream_event', event: { type: 'content_block_start', index, content_block: { type: 'text', text: '' } } });
@@ -118,7 +154,7 @@ async function main() {
   out({ type: 'assistant', message: { id: msg2, role: 'assistant', model: 'fake-model-1', content: [{ type: 'text', text: answer }] } });
   out({ type: 'stream_event', event: { type: 'message_stop' } });
 
-  out({ type: 'result', subtype: 'success', is_error: false, duration_ms: 2400, total_cost_usd: 0.0123, num_turns: 2, session_id: sessionId, result: answer, permission_denials: [] });
+  out({ type: 'result', subtype: 'success', is_error: false, duration_ms: 2400, total_cost_usd: 0.0123, num_turns: 2, session_id: sessionId, result: answer, permission_denials: process.env.FAKE_DENY ? [{ tool_name: process.env.FAKE_DENY }] : [] });
 }
 
 main().catch((err) => {

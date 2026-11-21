@@ -30,6 +30,16 @@ contextBridge.exposeInMainWorld('api', {
   authCancel: () => ipcRenderer.invoke('auth:cancel'),
   onAuthLog: (cb) => on('auth:log', cb),
 
+  mcpList: () => ipcRenderer.invoke('mcp:list'),
+  mcpSave: (server) => ipcRenderer.invoke('mcp:save', server),
+  mcpDelete: (id) => ipcRenderer.invoke('mcp:delete', id),
+  mcpImport: (text) => ipcRenderer.invoke('mcp:import', text),
+  mcpTest: (idOrDraft) => ipcRenderer.invoke('mcp:test', idOrDraft),
+  mcpOAuthLogin: (id) => ipcRenderer.invoke('mcp:oauth-login', id),
+  mcpOAuthCancel: () => ipcRenderer.invoke('mcp:oauth-cancel'),
+  mcpOAuthLogout: (id) => ipcRenderer.invoke('mcp:oauth-logout', id),
+  connectorsList: () => ipcRenderer.invoke('connectors:list'),
+
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
   copy: (text) => ipcRenderer.invoke('clipboard:write', text),
 });

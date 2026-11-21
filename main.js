@@ -1,12 +1,14 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeTheme, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const mcp = require('./mcp');
+const { createOAuth } = require('./oauth');
 
 // Для тестов: отдельная папка данных, чтобы не трогать реальные.
 if (process.env.MARK_DESK_USER_DATA) {
@@ -16,7 +18,18 @@ if (process.env.MARK_DESK_USER_DATA) {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODEL_RE = /^[\w.\[\]-]{1,64}$/;
 const MODES = new Set(['acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk', 'manual']);
-const DEFAULTS = { cwd: '', model: '', permissionMode: 'acceptEdits', claudePath: '', isolateConfig: false };
+const DEFAULTS = {
+  cwd: '',
+  model: '',
+  permissionMode: 'acceptEdits',
+  claudePath: '',
+  isolateConfig: false,
+  strictMcp: false,
+  allowedConnectors: [],
+};
+const CONNECTOR_RE = /^claude\.ai [\w .@()+-]{1,80}$/;
+// Как CLI называет инструменты сервера: mcp__<имя с заменой символов на _>__<инструмент>.
+const connectorPrefix = (name) => 'mcp__' + String(name).replace(/[^A-Za-z0-9_-]/g, '_');
 
 let settings = { ...DEFAULTS };
 let chats = [];
@@ -24,6 +37,19 @@ let win = null;
 let activeRun = null;
 let authProc = null;
 let nextRunId = 1;
+// OAuth для удалённых MCP-серверов; токены шифруются средствами системы (DPAPI/Keychain).
+const oauth = createOAuth({
+  dir: () => app.getPath('userData'),
+  encrypt: (text) =>
+    safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text).toString('base64') : null,
+  decrypt: (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64')),
+  // Для проверок без браузера адрес входа можно записать в файл.
+  openUrl: async (url) => {
+    if (process.env.MARK_DESK_OPEN_URL_FILE) fs.writeFileSync(process.env.MARK_DESK_OPEN_URL_FILE, url);
+    else await shell.openExternal(url);
+  },
+});
+const mcpStore = mcp.createStore(() => app.getPath('userData'), { getToken: (s) => oauth.token(s) });
 
 // ───────────────────────── файлы и настройки ─────────────────────────
 
@@ -284,7 +310,9 @@ function spawnClaude(args, options) {
   }
   // .cmd/.bat на Windows нельзя запускать без shell. Аргументы у нас проверенные.
   if (/\.(cmd|bat)$/i.test(exe)) {
-    return spawn(`"${exe}"`, args, { ...options, shell: true });
+    // С shell:true Node склеивает аргументы пробелами, поэтому аргументы с пробелами берём в кавычки.
+    const quote = (a) => (/[\s&|<>^()%!]/.test(a) ? `"${String(a).replace(/"/g, '""')}"` : a);
+    return spawn(`"${exe}"`, args.map(quote), { ...options, shell: true });
   }
   return spawn(exe, args, options);
 }
@@ -349,8 +377,20 @@ function launch(chat, text, { model, permissionMode, resume }) {
   if (typeof model === 'string' && model && MODEL_RE.test(model)) args.push('--model', model);
   const resumeId = resume && UUID_RE.test(chat.sessionId || '') ? chat.sessionId : null;
   if (resumeId) args.push('--resume', resumeId);
+  // MCP-серверы приложения. Эти флаги принимают списки значений, поэтому идут последними.
+  const mcpRun = mcpStore.runArgs({
+    permissionMode,
+    strict: !!settings.strictMcp,
+    extraAllow: (settings.allowedConnectors || []).map(connectorPrefix),
+  });
+  args.push(...mcpRun.args);
 
-  const child = spawnClaude(args, { cwd: chat.cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: cliEnv() });
+  const child = spawnClaude(args, {
+    cwd: chat.cwd,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...cliEnv(), ...mcpRun.env },
+  });
 
   const run = {
     id: nextRunId++,
@@ -459,6 +499,12 @@ ipcMain.handle('settings:set', (_e, patch) => {
       settings.claudePath = patch.claudePath;
     }
     if (typeof patch.isolateConfig === 'boolean') settings.isolateConfig = patch.isolateConfig;
+    if (typeof patch.strictMcp === 'boolean') settings.strictMcp = patch.strictMcp;
+    if (Array.isArray(patch.allowedConnectors)) {
+      settings.allowedConnectors = [...new Set(patch.allowedConnectors)]
+        .filter((n) => typeof n === 'string' && CONNECTOR_RE.test(n))
+        .slice(0, 50);
+    }
   }
   saveSettings();
   return publicState();
@@ -543,13 +589,76 @@ ipcMain.handle('auth:code', (_e, code) => {
   }
 });
 
+// ───── MCP-серверы ─────
+
+// Коннекторы аккаунта Claude (claude.ai) CLI подхватывает сам; `claude mcp list` показывает их статус.
+function parseMcpList(out) {
+  const res = [];
+  for (const line of String(out).split(/\r?\n/)) {
+    const m = line.match(/^(claude\.ai .+?):\s+(\S+)\s+-\s+(.*)$/);
+    if (!m) continue;
+    const raw = m[3].trim();
+    let status = 'failed';
+    if (/needs auth/i.test(raw)) status = 'needs-auth';
+    else if (/connected/i.test(raw) && !/not connected|fail/i.test(raw)) status = 'connected';
+    res.push({ name: m[1].trim(), url: m[2], status, raw });
+  }
+  return res;
+}
+
+ipcMain.handle('connectors:list', async () => {
+  const r = await runClaudeOnce(['mcp', 'list'], 90000);
+  if (r.noCli) return { ok: false, error: r.err };
+  return { ok: true, connectors: parseMcpList(r.out) };
+});
+
+// К серверам с OAuth добавляем состояние входа (сами токены в окно не передаются).
+const withAuth = (s) => (s.type !== 'stdio' && s.auth === 'oauth' ? { ...s, oauth: oauth.status(s) } : s);
+const withAuthResult = (r) => (r && Array.isArray(r.servers) ? { ...r, servers: r.servers.map(withAuth) } : r);
+
+ipcMain.handle('mcp:list', () => ({ servers: mcpStore.list().map(withAuth), strict: !!settings.strictMcp }));
+ipcMain.handle('mcp:save', (_e, raw) => withAuthResult(mcpStore.upsert(raw)));
+ipcMain.handle('mcp:delete', (_e, id) => {
+  const s = mcpStore.get(String(id));
+  if (s) oauth.logout(s.id);
+  return mcpStore.remove(String(id)).map(withAuth);
+});
+ipcMain.handle('mcp:import', (_e, text) =>
+  typeof text === 'string' && text.trim() && text.length < 200000
+    ? withAuthResult(mcpStore.importJson(text))
+    : { ok: false, error: 'Вставьте JSON с настройками серверов.' }
+);
+// Проверка по id сохранённого сервера или по черновику из формы.
+ipcMain.handle('mcp:test', async (_e, arg) => {
+  const v = typeof arg === 'string' ? { server: mcpStore.get(arg) } : mcp.validate(arg);
+  if (v.error) return { ok: false, error: v.error };
+  const server = v.server;
+  const token = server && server.type !== 'stdio' && server.auth === 'oauth' ? await oauth.ensureFresh(server) : null;
+  const result = await mcp.testServer(server, { token });
+  // Для сохранённого сервера запоминаем список инструментов: по нему работает окно «Разрешения».
+  if (typeof arg === 'string' && result.ok) mcpStore.setKnownTools(arg, result.tools);
+  return result;
+});
+
+// Вход через OAuth: открывает браузер и ждёт подтверждения (до 5 минут).
+ipcMain.handle('mcp:oauth-login', (_e, id) => {
+  const s = mcpStore.get(String(id));
+  if (!s || s.type === 'stdio' || s.auth !== 'oauth') return { ok: false, error: 'Для этого сервера OAuth не включён.' };
+  return oauth.login(s);
+});
+ipcMain.handle('mcp:oauth-cancel', () => oauth.cancel());
+ipcMain.handle('mcp:oauth-logout', (_e, id) => {
+  oauth.logout(String(id), true);
+  return true;
+});
+
 ipcMain.handle('auth:cancel', () => {
   if (!authProc) return false;
   killTree(authProc);
   return true;
 });
 
-ipcMain.handle('claude:send', (_e, opts) => {
+ipcMain.handle('claude:send', async (_e, opts) => {
   if (activeRun) return { ok: false, error: 'Предыдущий запрос ещё выполняется.' };
   const { text, chatId, cwd, model, permissionMode } = opts || {};
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'Пустое сообщение.' };
@@ -557,6 +666,14 @@ ipcMain.handle('claude:send', (_e, opts) => {
   let chat = findChat(chatId);
   const dir = chat ? chat.cwd : cwd;
   if (typeof dir !== 'string' || !isDir(dir)) return { ok: false, error: `Папка не найдена: ${dir}` };
+
+  // Токены OAuth обновляем до запуска: CLI получит их через переменные окружения.
+  await Promise.all(
+    mcpStore.list()
+      .filter((s) => s.enabled && s.type !== 'stdio' && s.auth === 'oauth')
+      .map((s) => oauth.ensureFresh(s))
+  );
+  if (activeRun) return { ok: false, error: 'Предыдущий запрос ещё выполняется.' };
 
   const isNew = !chat;
   if (isNew) chat = newChat(text, dir);
@@ -641,6 +758,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     loadSettings();
     loadIndex();
+    mcpStore.load();
     createWindow();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
