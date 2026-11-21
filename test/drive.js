@@ -256,6 +256,57 @@ const scenarios = {
     })`), null, 2));
   },
 
+  // Полный путь входа: ссылка, неверный код, верный код, отмена.
+  async login(t) {
+    const banner = () => t.evaluate(`({
+      pill: document.getElementById('authPill').textContent,
+      visible: !document.getElementById('banner').classList.contains('hidden'),
+      text: document.getElementById('bannerText').textContent,
+      log: document.getElementById('bannerLog').textContent,
+      form: !document.getElementById('bannerForm').classList.contains('hidden'),
+      buttons: [...document.querySelectorAll('#bannerActions button')].map(b => b.textContent),
+    })`);
+    const submit = (code) => t.evaluate(`(() => {
+      document.getElementById('authCode').value = ${JSON.stringify(code)};
+      document.getElementById('authSend').click();
+    })()`);
+    const clickBanner = (label) => t.evaluate(`[...document.querySelectorAll('#bannerActions button')].find(b => b.textContent === ${JSON.stringify(label)}).click()`);
+
+    await t.waitFor(`document.getElementById('authPill').textContent === 'Нужен вход'`, 'статус «Нужен вход»', 10000);
+    console.log('1 not logged in:', JSON.stringify(await banner()));
+
+    await clickBanner('Войти');
+    await t.waitFor(`document.querySelectorAll('#bannerActions button').length >= 3`, 'кнопки со ссылкой', 10000);
+    await t.shot('50-login-waiting.png');
+    console.log('2 waiting for code:', JSON.stringify(await banner()));
+
+    await submit('wrong-code');
+    await t.waitFor(`document.getElementById('bannerText').textContent.includes('Нажмите «Войти»')`, 'отказ по неверному коду', 10000);
+    await t.shot('51-login-wrong.png');
+    console.log('3 wrong code:', JSON.stringify(await banner()));
+
+    await clickBanner('Войти');
+    await t.waitFor(`!document.getElementById('bannerForm').classList.contains('hidden')`, 'форма кода', 10000);
+    await submit('good-code#state');
+    await t.waitFor(`document.getElementById('authPill').textContent === 'Вход выполнен'`, 'успешный вход', 10000);
+    await sleep(300);
+    await t.shot('52-login-ok.png');
+    console.log('4 good code:', JSON.stringify(await banner()));
+  },
+
+  async logincancel(t) {
+    await t.waitFor(`document.getElementById('authPill').textContent === 'Нужен вход'`, 'статус «Нужен вход»', 10000);
+    await t.evaluate(`[...document.querySelectorAll('#bannerActions button')].find(b => b.textContent === 'Войти').click()`);
+    await t.waitFor(`document.querySelectorAll('#bannerActions button').length >= 3`, 'кнопки со ссылкой', 10000);
+    await t.evaluate(`[...document.querySelectorAll('#bannerActions button')].find(b => b.textContent === 'Отмена').click()`);
+    await t.waitFor(`document.getElementById('bannerText').textContent.includes('отменён')`, 'отмена входа', 10000);
+    console.log('cancelled:', JSON.stringify(await t.evaluate(`({
+      text: document.getElementById('bannerText').textContent,
+      form: !document.getElementById('bannerForm').classList.contains('hidden'),
+      pill: document.getElementById('authPill').textContent,
+    })`)));
+  },
+
   // Переключатель отдельной конфигурации CLI.
   async isolate(t) {
     const status = () => t.evaluate(`window.api.authStatus().then(r => r.text)`);

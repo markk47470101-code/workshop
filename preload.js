@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('api', {
 
   authStatus: () => ipcRenderer.invoke('auth:status'),
   authLogin: () => ipcRenderer.invoke('auth:login'),
+  authCode: (code) => ipcRenderer.invoke('auth:code', code),
+  authCancel: () => ipcRenderer.invoke('auth:cancel'),
   onAuthLog: (cb) => on('auth:log', cb),
 
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),

@@ -185,7 +185,7 @@ function persistEvent(run, ev) {
     case 'result':
       chat.updatedAt = Date.now();
       if (!ev.is_error) {
-        appendChat(chat.id, { type: 'result', duration_ms: ev.duration_ms, total_cost_usd: ev.total_cost_usd });
+        appendChat(chat.id, { type: 'result', duration_ms: ev.duration_ms });
       }
       saveIndex();
       break;
@@ -512,12 +512,14 @@ ipcMain.handle('auth:login', () => new Promise((resolve) => {
   if (authProc) { resolve({ ok: false, error: 'Вход уже выполняется.' }); return; }
   let child;
   try {
-    child = spawnClaude(['auth', 'login'], { cwd: os.homedir(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: cliEnv() });
+    // stdin открыт: CLI ждёт на нём код, который показывает страница входа.
+    child = spawnClaude(['auth', 'login'], { cwd: os.homedir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: cliEnv() });
   } catch (err) {
     resolve({ ok: false, error: err.message });
     return;
   }
   authProc = child;
+  child.stdin.on('error', () => { /* процесс мог завершиться раньше */ });
   const forward = (d) => send('auth:log', String(d));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -527,6 +529,25 @@ ipcMain.handle('auth:login', () => new Promise((resolve) => {
   child.on('error', (e) => { clearTimeout(timer); authProc = null; resolve({ ok: false, error: e.message }); });
   child.on('close', (code) => { clearTimeout(timer); authProc = null; resolve({ ok: code === 0, code }); });
 }));
+
+// Передаёт код со страницы входа в запущенный `claude auth login`. Сам код нигде не логируется.
+ipcMain.handle('auth:code', (_e, code) => {
+  if (!authProc || !authProc.stdin || authProc.stdin.destroyed) return false;
+  const c = typeof code === 'string' ? code.trim() : '';
+  if (!c || c.length > 4000 || /[\r\n]/.test(c)) return false;
+  try {
+    authProc.stdin.write(c + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('auth:cancel', () => {
+  if (!authProc) return false;
+  killTree(authProc);
+  return true;
+});
 
 ipcMain.handle('claude:send', (_e, opts) => {
   if (activeRun) return { ok: false, error: 'Предыдущий запрос ещё выполняется.' };
@@ -578,6 +599,7 @@ function createWindow() {
     minWidth: 760,
     minHeight: 520,
     title: 'Mark Desk',
+    icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#161513' : '#faf8f3',
     autoHideMenuBar: true,
     webPreferences: {
@@ -612,6 +634,9 @@ if (!app.requestSingleInstanceLock()) {
       win.focus();
     }
   });
+
+  // Чтобы значок и группировка в панели задач Windows принадлежали приложению, а не electron.exe.
+  if (process.platform === 'win32') app.setAppUserModelId('com.markdesk.app');
 
   app.whenReady().then(() => {
     loadSettings();

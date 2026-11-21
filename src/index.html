@@ -11,7 +11,7 @@
   <div class="app" id="app">
     <aside class="sidebar">
       <div class="side-head">
-        <div class="brand"><span class="brand-mark"></span>Mark Desk</div>
+        <div class="brand"><img class="brand-logo" src="../assets/icon.svg" alt="">Mark Desk</div>
         <button id="newChat" class="btn primary block" type="button">＋ Новый чат</button>
         <input id="sessionFilter" type="search" placeholder="Поиск по чатам" spellcheck="false">
       </div>
@@ -40,6 +40,10 @@
       <div id="banner" class="banner hidden">
         <div class="banner-text" id="bannerText"></div>
         <pre class="banner-log hidden" id="bannerLog"></pre>
+        <div class="banner-form hidden" id="bannerForm">
+          <input id="authCode" type="text" placeholder="Код со страницы входа" autocomplete="off" spellcheck="false">
+          <button id="authSend" class="btn primary" type="button">Отправить код</button>
+        </div>
         <div class="banner-actions" id="bannerActions"></div>
       </div>
 

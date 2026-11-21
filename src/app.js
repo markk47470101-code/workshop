@@ -418,7 +418,6 @@
 
     const parts = [];
     if (ev.duration_ms) parts.push((ev.duration_ms / 1000).toFixed(1) + ' с');
-    if (ev.total_cost_usd) parts.push('$' + Number(ev.total_cost_usd).toFixed(4));
     endTurn();
     if (parts.length) chatInner.append(el('div', 'run-meta', parts.join(' · ')));
     scroll();
@@ -604,6 +603,7 @@
     $('bannerText').textContent = text;
     $('bannerLog').classList.add('hidden');
     $('bannerLog').textContent = '';
+    $('bannerForm').classList.add('hidden');
     const actions = $('bannerActions');
     actions.textContent = '';
     for (const b of buttons || []) actions.append(b);
@@ -649,23 +649,84 @@
     setAuth(r.loggedIn);
   }
 
-  async function doLogin() {
-    showBanner('Открываю браузер для входа… Подтвердите вход там и вернитесь сюда.', []);
-    $('bannerLog').classList.remove('hidden');
-    const r = await api.authLogin();
-    await refreshAuth();
-    if (!state.authOk) {
-      showBanner(
-        'Вход не выполнен' + (r.error ? ': ' + r.error : '') + '. Попробуйте ещё раз.',
-        [button('Войти', doLogin, 'primary')]
+  // Вход: CLI печатает ссылку и ждёт код со страницы входа (или сам получает ответ браузера).
+  const URL_RE = /https?:\/\/\S+/;
+  const login = { url: null, log: '', cancelled: false };
+
+  function renderLoginBanner() {
+    const actions = $('bannerActions');
+    actions.textContent = '';
+    if (login.url) {
+      actions.append(
+        button('Открыть ссылку', () => api.openExternal(login.url)),
+        button('Копировать ссылку', () => api.copy(login.url))
       );
+    }
+    actions.append(button('Отмена', () => { login.cancelled = true; api.authCancel(); }, 'ghost'));
+
+    // Служебный вывод CLI без ссылки и без приглашения к вводу.
+    const shown = login.log
+      .replace(/If the browser didn't open, visit:/g, '')
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/Paste code here if prompted >/g, '')
+      .split(/\r?\n/).map((s) => s.trim()).filter(Boolean).join('\n');
+    const log = $('bannerLog');
+    log.textContent = shown;
+    log.classList.toggle('hidden', !shown);
+  }
+
+  function loginFailure(r) {
+    const lines = login.log.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).reverse();
+    const reason = lines.find((l) => /couldn.t log in|error|failed|invalid|expired/i.test(l));
+    return (reason || r.error || 'Вход не выполнен.') + ' Нажмите «Войти», чтобы получить новую ссылку и код.';
+  }
+
+  async function doLogin() {
+    login.url = null;
+    login.log = '';
+    login.cancelled = false;
+    showBanner(
+      'Войдите в аккаунт Anthropic. Откроется браузер. Если страница покажет код — вставьте его ниже и нажмите «Отправить код».',
+      []
+    );
+    $('bannerForm').classList.remove('hidden');
+    $('authCode').value = '';
+    renderLoginBanner();
+    $('authCode').focus();
+
+    const r = await api.authLogin();
+    $('bannerForm').classList.add('hidden');
+    await refreshAuth();
+    if (!state.authOk && state.claudePath !== null) {
+      showBanner(login.cancelled ? 'Вход отменён.' : loginFailure(r), [button('Войти', doLogin, 'primary')]);
     }
   }
 
+  async function sendAuthCode() {
+    const code = $('authCode').value.trim();
+    if (!code) return;
+    const ok = await api.authCode(code);
+    if (!ok) {
+      $('bannerText').textContent = 'Не удалось передать код: вход не запущен или уже завершён. Нажмите «Войти» ещё раз.';
+      return;
+    }
+    $('authCode').value = '';
+    $('bannerText').textContent = 'Проверяю код…';
+  }
+
+  $('authSend').addEventListener('click', sendAuthCode);
+  $('authCode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendAuthCode();
+    }
+  });
+
   api.onAuthLog((text) => {
-    const log = $('bannerLog');
-    log.classList.remove('hidden');
-    log.textContent = (log.textContent + text).slice(-800);
+    login.log = (login.log + text).slice(-4000);
+    const m = login.log.match(URL_RE);
+    if (m) login.url = m[0];
+    renderLoginBanner();
   });
 
   // ───────────── диалог настроек ─────────────

@@ -21,7 +21,8 @@ npm start
 - Своя история чатов: открыть, продолжить, удалить (кнопка × при наведении).
 - Выбор рабочей папки, модели и режима разрешений.
 - Остановка генерации (кнопка ■ или Esc), `Ctrl+N` — новый чат.
-- Вход в аккаунт прямо из приложения (кнопка «Войти» запускает `claude auth login`).
+- Вход в аккаунт прямо из приложения: кнопка «Войти» запускает `claude auth login`, ссылку можно
+  открыть или скопировать, а код со страницы входа вставляется в поле и уходит в CLI.
 
 ## Своя история
 
@@ -85,6 +86,8 @@ node test\drive.js        # SCENARIO=chat | stop | nologin | history | reopen | 
 main.js        процесс Electron: запуск CLI, история, вход, настройки
 preload.js     безопасный мост (contextIsolation) между окном и main
 src/           интерфейс: index.html, styles.css, app.js, markdown.js
+assets/        иконка приложения: icon.svg (исходник), icon.png, icon.ico
+scripts/       make-icons.js — пересборка PNG и ICO из icon.svg (`npm run icons`)
 test/          поддельный CLI и скрипт проверки интерфейса
 ```
 

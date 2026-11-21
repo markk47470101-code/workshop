@@ -9,13 +9,35 @@ const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  // FAKE_NEED_LOGIN=1 + FAKE_LOGIN_MARKER=<файл>: «вход» считается выполненным, когда файл существует.
+  const marker = process.env.FAKE_LOGIN_MARKER || '';
   if (args[0] === 'auth' && args[1] === 'status') {
+    if (process.env.FAKE_NEED_LOGIN === '1' && !(marker && require('fs').existsSync(marker))) {
+      console.log('{"loggedIn":false}');
+      process.exitCode = 1;
+      return;
+    }
     console.log('Logged in (fake) config=' + (process.env.CLAUDE_CONFIG_DIR || 'default'));
     return;
   }
   if (args[0] === 'auth' && args[1] === 'login') {
-    console.log('Fake login: opening browser…');
-    await sleep(300);
+    // Повторяет поведение настоящего CLI: печатает ссылку и ждёт код на stdin.
+    console.log('Opening browser to sign in…');
+    console.log("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fake");
+    process.stdout.write('Paste code here if prompted > ');
+    const rl = require('readline').createInterface({ input: process.stdin });
+    const line = await new Promise((resolve) => {
+      rl.once('line', resolve);
+      rl.once('close', () => resolve(null));
+    });
+    rl.close();
+    if (line && line.trim() === 'good-code#state') {
+      if (marker) require('fs').writeFileSync(marker, 'ok');
+      console.log('\nLogin successful.');
+      return;
+    }
+    console.error("\nCouldn't log in: That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code.");
+    process.exitCode = 1;
     return;
   }
 

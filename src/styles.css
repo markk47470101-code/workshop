@@ -75,10 +75,7 @@ button { cursor: pointer; }
   display: flex; align-items: center; gap: 8px;
   font-weight: 650; letter-spacing: 0.01em; padding: 2px 4px;
 }
-.brand-mark {
-  width: 10px; height: 10px; border-radius: 3px; background: var(--accent);
-  transform: rotate(45deg);
-}
+.brand-logo { width: 26px; height: 26px; display: block; }
 .side-foot { padding: 10px 12px 12px; border-top: 1px solid var(--border); }
 
 .main {
@@ -184,7 +181,9 @@ select {
   margin: 0; max-height: 120px; overflow: auto; font: 12px/1.5 var(--mono);
   color: var(--muted); white-space: pre-wrap; word-break: break-all;
 }
-.banner-actions { display: flex; gap: 8px; }
+.banner-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.banner-form { display: flex; gap: 8px; }
+.banner-form input { flex: 1; min-width: 0; }
 
 /* ───── чат ───── */
 
